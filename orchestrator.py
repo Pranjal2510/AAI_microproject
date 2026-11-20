@@ -8,7 +8,7 @@ from data import PRODUCTS, LOCATIONS, HISTORY, demand_value, make_vendors
 from agents import (InventoryTrackingAgent, DemandForecastAgent, StockoutRiskAgent, ReorderDecisionAgent,
                     VendorIntelligenceAgent, CostOptimizationAgent, PurchaseOrderAgent,
                     WarehouseOptimizationAgent, AnomalyDetectionAgent, ReportingDashboardAgent,
-                    PerishabilityAgent, DynamicPricingAgent)
+                    PerishabilityAgent, DynamicPricingAgent, LLMCoPilotAgent)
 
 
 @dataclass
@@ -237,6 +237,7 @@ class Orchestrator:
         self.reorder, self.vendor, self.cost = ReorderDecisionAgent(), VendorIntelligenceAgent(), CostOptimizationAgent()
         self.po_agent, self.warehouse = PurchaseOrderAgent(), WarehouseOptimizationAgent()
         self.anomaly, self.reporter = AnomalyDetectionAgent(), ReportingDashboardAgent()
+        self.copilot = LLMCoPilotAgent()
 
     def analyze_product(self, sim, p, params, delays=None):
         meta, T = PRODUCTS[p], []

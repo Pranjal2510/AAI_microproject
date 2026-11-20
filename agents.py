@@ -1,5 +1,8 @@
 """All agents. Each agent is a small class with one clear responsibility."""
+import json
 import math
+import urllib.request
+import urllib.error
 from datetime import timedelta
 from statistics import NormalDist
 import numpy as np
@@ -352,3 +355,169 @@ class ReportingDashboardAgent:
         return dict(fill_rate=1 - k["lost"] / max(k["demand"], 1), lost_units=k["lost"], spend=spend,
                     revenue=rev, profit=profit, spoilage_units=spoil_units, spoilage_cost=spoil_cost,
                     open_pos=len(sim.pending()), inventory_value=inv_val)
+
+
+class LLMCoPilotAgent:
+    name = "AI Supply Chain Co-Pilot"
+
+    def __init__(self, api_key=None, provider="gemini"):
+        self.api_key = api_key
+        self.provider = provider
+
+    def _call_gemini(self, system_prompt, user_prompt):
+        if not self.api_key:
+            return None
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={self.api_key}"
+        payload = {
+            "contents": [
+                {"role": "user", "parts": [{"text": f"{system_prompt}\n\nTask:\n{user_prompt}"}]}
+            ],
+            "generationConfig": {"temperature": 0.2, "maxOutputTokens": 600}
+        }
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=8) as response:
+                res = json.loads(response.read().decode("utf-8"))
+                return res["candidates"][0]["content"]["parts"][0]["text"]
+        except Exception:
+            return None
+
+    def generate_briefing(self, sim, res):
+        """Generates an executive briefing using live LLM or rule-based fallback."""
+        k = res["kpis"]
+        dec = res["decisions"]
+        alerts = res["alerts"]
+
+        high_risks = [p for p, d in dec.items() if d["risk"]["level"] == "HIGH"]
+        expiring = [p for p, d in dec.items() if d["perish"]["status"] in ("HIGH", "MEDIUM") and d["perish"]["at_risk_qty"] > 0]
+        pos = [d["po"] for d in dec.values() if d["po"]]
+        discounts = [p for p, d in dec.items() if d["pricing"]["discount_pct"] > 0]
+
+        if self.api_key:
+            sys_prompt = "You are an autonomous AI supply chain co-pilot briefing the COO. Write a concise, 3-4 bullet executive daily briefing with bold highlights. Focus on operational disruptions, financial performance, and actions taken."
+            ctx_summary = f"""
+Sim Day: {sim.day} ({sim.today.strftime('%d %b %Y')})
+Fill Rate: {k['fill_rate']:.1%}, Revenue: ₹{k['revenue']:,.0f}, Net Profit: ₹{k['profit']:,.0f}, Spend: ₹{k['spend']:,.0f}, Spoilage Loss: ₹{k['spoilage_cost']:,.0f}
+High Stockout Risks: {', '.join(high_risks) if high_risks else 'None'}
+Perishability/Expiry Risks: {', '.join(expiring) if expiring else 'None'}
+Active Purchase Orders: {len(pos)} placed
+Dynamic Markdown Discounts: {', '.join(discounts) if discounts else 'None'}
+Active Alerts: {len(alerts)} alerts detected
+"""
+            llm_res = self._call_gemini(sys_prompt, f"Generate the executive briefing for this state:\n{ctx_summary}")
+            if llm_res:
+                return llm_res
+
+        # High quality offline fallback
+        bullets = []
+        bullets.append(f"**Financial Performance**: Overall fill rate is **{k['fill_rate']:.1%}** with **₹{k['revenue']:,.0f}** revenue and **₹{k['profit']:,.0f}** net profit.")
+        if high_risks:
+            bullets.append(f"**Stockout Risk Alert**: Critical replenishment needed for **{', '.join(high_risks)}** — priority POs drafted to prevent lost sales.")
+        else:
+            bullets.append("**Inventory Position**: Core inventory levels across regional warehouses are currently stable.")
+
+        if expiring:
+            exp_details = [f"**{p}** ({dec[p]['perish']['at_risk_qty']} units at risk)" for p in expiring]
+            bullets.append(f"**Perishability & Spoilage**: {', '.join(exp_details)}. Dynamic pricing has applied clearance discounts to accelerate sell-through.")
+        elif k.get('spoilage_units', 0) > 0:
+            bullets.append(f"**Waste Report**: Spoilage stands at **{k['spoilage_units']} units** (₹{k['spoilage_cost']:,.0f} write-off).")
+
+        if pos:
+            po_text = ", ".join([f"**{po['qty']} units of {po['product']}** from {po['vendor']}" for po in pos[:2]])
+            bullets.append(f"**Procurement Pipeline**: Active purchase orders placed for {po_text}.")
+
+        return "\n\n".join([f"• {b}" for b in bullets])
+
+    def answer_question(self, question, sim, res):
+        """Answers supply chain manager questions using LLM or local reasoning engine."""
+        q = question.lower()
+        dec = res["decisions"]
+        k = res["kpis"]
+
+        if self.api_key:
+            state_ctx = {
+                "day": sim.day,
+                "date": sim.today.strftime("%d %b %Y"),
+                "kpis": k,
+                "products": {
+                    p: {
+                        "stock": d["inv"]["total"],
+                        "cover_days": round(d["risk"]["cover_days"], 1),
+                        "risk_level": d["risk"]["level"],
+                        "days_to_stockout": "inf" if math.isinf(d["risk"]["days_to_stockout"]) else round(d["risk"]["days_to_stockout"], 1),
+                        "perishability": d["perish"]["status"],
+                        "at_risk_spoilage": d["perish"]["at_risk_qty"],
+                        "current_price": d["pricing"]["current_price"],
+                        "base_price": d["pricing"]["base_price"],
+                        "pricing_reason": d["pricing"]["reason"],
+                        "po": d["po"],
+                        "transfers": d["transfers"]
+                    } for p, d in dec.items()
+                },
+                "alerts": res["alerts"],
+                "recent_events": [e[1] for e in sim.events[-5:]]
+            }
+            sys_prompt = "You are the autonomous AI Supply Chain Co-Pilot. Answer the manager's question clearly, professionally, and directly citing specific products, quantities, prices, and vendor data from the provided state."
+            user_prompt = f"Simulation State:\n{json.dumps(state_ctx, default=str)}\n\nManager Question: {question}"
+            llm_res = self._call_gemini(sys_prompt, user_prompt)
+            if llm_res:
+                return llm_res
+
+        # Offline Intelligent Rule-Based Engine
+        if any(w in q for w in ["vendor", "supplier", "choose", "why buy", "po"]):
+            po_items = [(p, d["po"]) for p, d in dec.items() if d["po"]]
+            if not po_items:
+                return "There are currently no active Purchase Orders drafted or placed. When inventory drops below the Reorder Point, our Vendor Intelligence Agent scores vendors based on unit price, delivery lead time, and past reliability."
+            p, po = po_items[0]
+            v_reason = dec[p]["ranking"]["reason"] if dec[p].get("ranking") else "lowest total cost"
+            c_note = dec[p]["cost"]["note"] if dec[p].get("cost") else ""
+            return (f"**Purchase Order Decision for {p}**:\n\n"
+                    f"We selected **{po['vendor']}** for **{po['qty']} units** at ₹{po['unit_price']}/unit (Total: ₹{po['total']:,.0f}).\n\n"
+                    f"• **Reasoning**: {v_reason}.\n"
+                    f"• **Cost Analysis**: {c_note}\n\n"
+                    f"Our Vendor Intelligence Agent calculated that choosing {po['vendor']} minimized expected total costs by avoiding stockout penalties.")
+
+        elif any(w in q for w in ["perish", "spoil", "waste", "expire", "expiry", "cold"]):
+            perish_items = [p for p, d in dec.items() if d["perish"]["status"] in ("HIGH", "MEDIUM")]
+            if perish_items:
+                p = perish_items[0]
+                per = dec[p]["perish"]
+                return (f"**Perishability & Expiry Analysis for {p}**:\n\n"
+                        f"• **Status**: {per['status']}\n"
+                        f"• **At-risk units**: {per['at_risk_qty']} units expiring within 3 days\n"
+                        f"• **Projected loss**: ₹{per['exp_loss_est']:,.0f}\n\n"
+                        f"**Mitigation Action**: The Dynamic Pricing Agent has discounted {p} to ₹{dec[p]['pricing']['current_price']} ({dec[p]['pricing']['reason']}) to stimulate customer demand and clear stock before spoilage occurs.")
+            return f"Currently, all perishable inventory is rotating safely within shelf-life limits (FEFO). Total spoilage loss is ₹{k['spoilage_cost']:,.0f} ({k['spoilage_units']} units)."
+
+        elif any(w in q for w in ["price", "pricing", "discount", "markdown", "surge"]):
+            adjusted = [(p, d["pricing"]) for p, d in dec.items() if d["pricing"]["is_adjusted"]]
+            if adjusted:
+                lines = [f"• **{p}**: ₹{pr['current_price']} (Base ₹{pr['base_price']}) — *{pr['reason']}* (Demand uplift ×{pr['demand_mult']})" for p, pr in adjusted]
+                return "**Active Dynamic Pricing Strategies**:\n\n" + "\n".join(lines)
+            return "All products are currently selling at their standard baseline prices. Dynamic discounts trigger automatically when an item is overstocked or nearing batch expiry."
+
+        elif any(w in q for w in ["profit", "revenue", "financial", "kpi", "spend"]):
+            return (f"**Financial Health Summary**:\n\n"
+                    f"• **Gross Revenue**: ₹{k['revenue']:,.0f}\n"
+                    f"• **Procurement Spend**: ₹{k['spend']:,.0f}\n"
+                    f"• **Spoilage Loss**: ₹{k['spoilage_cost']:,.0f}\n"
+                    f"• **Net Operating Profit**: ₹{k['profit']:,.0f}\n"
+                    f"• **Order Fill Rate**: {k['fill_rate']:.1%}")
+
+        elif any(w in q for w in ["transfer", "balance", "warehouse", "location"]):
+            transfers = [t for d in dec.values() for t in d.get("transfers", [])]
+            if transfers:
+                t_lines = [f"• Move **{t['qty']} units** of {d['product']} from **{t['frm']}** → **{t['to']}**" for d in dec.values() for t in d.get("transfers", [])]
+                return "**Recommended Warehouse Transfers**:\n\n" + "\n".join(t_lines) + "\n\nThese transfers rebalance stock across locations to prevent local stockouts while avoiding excessive holding fees."
+            return "All warehouses and fulfillment centers are currently balanced with no urgent transfers required."
+
+        else:
+            return (f"**Supply Chain Co-Pilot Status (Day {sim.day})**:\n\n"
+                    f"I am actively monitoring all 6 product lines across 4 facilities. "
+                    f"Fill rate is at **{k['fill_rate']:.1%}** with net operating profit of **₹{k['profit']:,.0f}**. "
+                    f"You can ask me about:\n"
+                    f"• Vendor selections & PO justifications\n"
+                    f"• Perishability and batch expiration risks\n"
+                    f"• Dynamic pricing & markdown strategies\n"
+                    f"• Warehouse balancing transfers")

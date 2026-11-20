@@ -55,6 +55,16 @@ with st.sidebar:
     if st.button("🔄 Reset simulation"):
         new_sim(seed, params)
         st.rerun()
+    st.divider()
+    with st.expander("🤖 AI Co-Pilot Settings", expanded=False):
+        gemini_key = st.text_input("Gemini API Key (Optional)", type="password", help="Leave empty to use built-in offline reasoning engine")
+        if gemini_key:
+            orch.copilot.api_key = gemini_key
+
+if "messages" not in st.session_state:
+    st.session_state.messages = [
+        {"role": "assistant", "content": "👋 Hello! I am your **Autonomous AI Supply Chain Co-Pilot**. Ask me any question about today's inventory, stockout risks, vendor selections, perishability warnings, or dynamic pricing strategies!"}
+    ]
 
 res = st.session_state.result
 dec, k = res["decisions"], res["kpis"]
@@ -67,11 +77,13 @@ m[3].metric("Net Profit", f"₹{k['profit']:,.0f}")
 m[4].metric("Procurement spend", f"₹{k['spend']:,.0f}")
 m[5].metric("Spoilage waste", f"₹{k['spoilage_cost']:,.0f}", f"{k['spoilage_units']} units", delta_color="inverse")
 
-tab_dash, tab_cock, tab_scn, tab_ord, tab_log = st.tabs(
-    ["📊 Dashboard", "🧠 Agent cockpit", "🧪 Scenario simulator", "🧾 Orders & vendors", "📜 Activity log"])
+tab_dash, tab_copilot, tab_cock, tab_scn, tab_ord, tab_log = st.tabs(
+    ["📊 Dashboard", "💬 AI Co-Pilot", "🧠 Agent cockpit", "🧪 Scenario simulator", "🧾 Orders & vendors", "📜 Activity log"])
 
 # ---------------- dashboard
 with tab_dash:
+    briefing = orch.copilot.generate_briefing(sim, res)
+    st.info(f"📋 **Daily Executive Briefing (AI Co-Pilot)**\n\n{briefing}")
     rows = []
     for p, d in dec.items():
         r, ro, pr, per = d["risk"], d["reorder"], d["pricing"], d["perish"]
@@ -110,6 +122,43 @@ with tab_dash:
     st.subheader("Warehouse balancing")
     wrows = [{"Product": p, "Location": l, **s} for p, d in dec.items() for l, s in d["loc_status"].items() if s["status"] != "Balanced"]
     st.dataframe(pd.DataFrame(wrows), hide_index=True) if wrows else st.info("All locations balanced")
+
+# ---------------- AI Co-Pilot
+with tab_copilot:
+    st.subheader("💬 Autonomous AI Supply Chain Co-Pilot")
+    mode_tag = "🟢 Connected to Google Gemini 1.5 Flash" if orch.copilot.api_key else "⚡ Running Built-in Offline Reasoning Engine"
+    st.caption(f"Status: **{mode_tag}** · Natural language interface explaining multi-agent decisions in real-time.")
+
+    st.markdown("##### Quick Inquiries (Click to Ask)")
+    qcol1, qcol2, qcol3, qcol4 = st.columns(4)
+    suggested = None
+    if qcol1.button("🏭 Why this vendor?"):
+        suggested = "Why did we choose our recent vendor for purchase orders?"
+    if qcol2.button("🥦 Spoilage risks?"):
+        suggested = "What are our critical perishability and spoilage risks today?"
+    if qcol3.button("🏷️ Dynamic discounts?"):
+        suggested = "Explain our active dynamic pricing and markdown strategies."
+    if qcol4.button("💰 Financial health?"):
+        suggested = "Give me an executive summary of our revenue, profit, and spend."
+
+    for msg in st.session_state.messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+    user_query = st.chat_input("Ask the AI Co-Pilot anything about your supply chain...")
+    final_query = suggested or user_query
+
+    if final_query:
+        st.session_state.messages.append({"role": "user", "content": final_query})
+        with st.chat_message("user"):
+            st.markdown(final_query)
+        with st.spinner("AI Co-Pilot analyzing agent consensus..."):
+            ans = orch.copilot.answer_question(final_query, sim, res)
+        st.session_state.messages.append({"role": "assistant", "content": ans})
+        with st.chat_message("assistant"):
+            st.markdown(ans)
+        if suggested:
+            st.rerun()
 
 # ---------------- cockpit
 with tab_cock:
