@@ -8,13 +8,14 @@ WEEKLY = [0.95, 0.90, 0.92, 0.97, 1.10, 1.25, 1.00]  # Mon..Sun
 
 # base = units/day, cost/price in INR, hold = holding cost/unit/day, penalty = stockout cost/unit
 # cover = initial days of stock, peak/amp = seasonality (day-of-year of peak, amplitude)
+# shelf_life = days before spoilage, elasticity = price elasticity of demand
 PRODUCTS = {
-    "Milk":        dict(base=50,  cost=50,  price=62,  hold=0.9,  penalty=45, cover=2.4, trend=0.0,   peak=150, amp=0.25),
-    "Rice":        dict(base=100, cost=40,  price=52,  hold=0.2,  penalty=25, cover=7.0, trend=0.005, peak=0,   amp=0.0),
-    "Bread":       dict(base=80,  cost=30,  price=40,  hold=0.8,  penalty=30, cover=3.5, trend=0.0,   peak=0,   amp=0.0),
-    "Eggs":        dict(base=200, cost=6,   price=8,   hold=0.1,  penalty=6,  cover=12,  trend=0.0,   peak=15,  amp=0.15),
-    "Sugar":       dict(base=70,  cost=42,  price=50,  hold=0.15, penalty=20, cover=14,  trend=0.0,   peak=305, amp=0.20),
-    "Cooking Oil": dict(base=60,  cost=120, price=145, hold=0.3,  penalty=60, cover=45,  trend=0.0,   peak=0,   amp=0.0),
+    "Milk":        dict(base=50,  cost=50,  price=62,  hold=0.9,  penalty=45, cover=2.4, trend=0.0,   peak=150, amp=0.25, shelf_life=6,   elasticity=1.4),
+    "Rice":        dict(base=100, cost=40,  price=52,  hold=0.2,  penalty=25, cover=7.0, trend=0.005, peak=0,   amp=0.0,  shelf_life=365, elasticity=0.8),
+    "Bread":       dict(base=80,  cost=30,  price=40,  hold=0.8,  penalty=30, cover=3.5, trend=0.0,   peak=0,   amp=0.0,  shelf_life=5,   elasticity=1.5),
+    "Eggs":        dict(base=200, cost=6,   price=8,   hold=0.1,  penalty=6,  cover=12,  trend=0.0,   peak=15,  amp=0.15, shelf_life=18,  elasticity=1.2),
+    "Sugar":       dict(base=70,  cost=42,  price=50,  hold=0.15, penalty=20, cover=14,  trend=0.0,   peak=305, amp=0.20, shelf_life=365, elasticity=0.6),
+    "Cooking Oil": dict(base=60,  cost=120, price=145, hold=0.3,  penalty=60, cover=45,  trend=0.0,   peak=0,   amp=0.0,  shelf_life=120, elasticity=0.9),
 }
 
 

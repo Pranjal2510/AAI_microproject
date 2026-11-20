@@ -224,6 +224,82 @@ class WarehouseOptimizationAgent:
         return dict(transfers=moves, status=status)
 
 
+class PerishabilityAgent:
+    name = "Perishability & Expiry Agent"
+
+    def assess(self, sim, p, fc):
+        meta = PRODUCTS[p]
+        shelf_life = meta.get("shelf_life", 365)
+        if shelf_life >= 180:
+            return dict(status="SAFE", expiring_soon=0, at_risk_qty=0, exp_loss_est=0.0,
+                        batches=[], shelf_life=shelf_life,
+                        note=f"Shelf life is {shelf_life} days (non-perishable). Spoilage risk negligible.")
+
+        all_batches = []
+        expiring_soon = 0
+        if hasattr(sim, "batches") and p in sim.batches:
+            for loc, blist in sim.batches[p].items():
+                for b in blist:
+                    rem_days = max(0, b["expiry_day"] - sim.day)
+                    all_batches.append(dict(location=loc, qty=b["qty"], days_left=rem_days, expiry_day=b["expiry_day"]))
+                    if rem_days <= 3:
+                        expiring_soon += b["qty"]
+
+        all_batches.sort(key=lambda x: x["days_left"])
+        exp_3d_demand = float(sum(fc["daily"][:3])) if len(fc["daily"]) >= 3 else float(fc["mean7"] * 3)
+        at_risk_qty = max(0, expiring_soon - int(exp_3d_demand))
+        loss_est = at_risk_qty * meta["cost"]
+
+        if at_risk_qty > 0.3 * exp_3d_demand and at_risk_qty >= 10:
+            status = "HIGH"
+        elif at_risk_qty > 0:
+            status = "MEDIUM"
+        else:
+            status = "SAFE"
+
+        if status == "HIGH":
+            note = f"CRITICAL: {expiring_soon} units expire in ≤3d vs 3d forecast demand of {exp_3d_demand:.0f}. Projected spoilage: {at_risk_qty} units (₹{loss_est:,.0f}). Requires clearance markdown!"
+        elif status == "MEDIUM":
+            note = f"WARNING: {expiring_soon} units near expiry (≤3d). At-risk surplus: {at_risk_qty} units. Recommending promotional discount."
+        else:
+            note = f"Healthy rotation (FEFO). {expiring_soon} units expiring in ≤3d within projected demand capacity ({exp_3d_demand:.0f} units)."
+
+        return dict(status=status, expiring_soon=expiring_soon, at_risk_qty=at_risk_qty,
+                    exp_loss_est=loss_est, batches=all_batches, shelf_life=shelf_life, note=note)
+
+
+class DynamicPricingAgent:
+    name = "Dynamic Pricing & Markdown Agent"
+
+    def evaluate(self, p, base_price, risk, perish, inv, fc):
+        meta = PRODUCTS[p]
+        disc = 0.0
+        surge = 0.0
+        reason = "Standard baseline price"
+
+        if perish["status"] == "HIGH" and perish["at_risk_qty"] > 0:
+            disc = 0.25
+            reason = f"Clearance Markdown (-25%): Liquidate {perish['at_risk_qty']} expiring units before spoilage"
+        elif perish["status"] == "MEDIUM" and perish["at_risk_qty"] > 0:
+            disc = 0.15
+            reason = f"Expiry Promotion (-15%): Accelerate sell-through of {perish['at_risk_qty']} near-expiry units"
+        elif risk["level"] == "OVERSTOCK":
+            disc = 0.10
+            reason = "Overstock Markdown (-10%): Stimulate demand velocity to relieve warehouse capacity"
+        elif risk["level"] == "HIGH" and risk["days_to_stockout"] < risk["lead"]:
+            surge = 0.08
+            reason = f"Surge Protection (+8%): Dampen stockout risk and preserve margin during supplier lead time"
+
+        current_price = round(base_price * (1.0 - disc + surge), 2)
+        elasticity = meta.get("elasticity", 1.0)
+        price_ratio = current_price / base_price
+        demand_mult = round((1.0 / price_ratio) ** elasticity, 2)
+
+        return dict(product=p, base_price=base_price, current_price=current_price,
+                    discount_pct=disc, surge_pct=surge, reason=reason,
+                    demand_mult=demand_mult, is_adjusted=bool(disc > 0 or surge > 0))
+
+
 class AnomalyDetectionAgent:
     name = "Anomaly Detection Agent"
 
@@ -250,6 +326,11 @@ class AnomalyDetectionAgent:
                 out.append(self._a(sim, p, "Inventory mismatch", "MEDIUM",
                                    f"{loc}: system says {sim.recorded[p][loc]}, physical count {sim.physical[p][loc]} (-{diff}) - possible theft/loss",
                                    fix=(p, loc)))
+        if hasattr(sim, "daily_spoilage") and sim.daily_spoilage.get(p, 0) > 0:
+            sp_units = sim.daily_spoilage[p]
+            cost = sp_units * PRODUCTS[p]["cost"]
+            out.append(self._a(sim, p, "Spoilage loss", "HIGH",
+                               f"{sp_units} units spoiled due to shelf-life expiry (Loss: ₹{cost:,.0f})"))
         return out
 
     @staticmethod
@@ -263,5 +344,11 @@ class ReportingDashboardAgent:
     def kpis(self, sim):
         k = sim.kpi
         inv_val = sum(sum(sim.recorded[p].values()) * PRODUCTS[p]["cost"] for p in PRODUCTS)
-        return dict(fill_rate=1 - k["lost"] / max(k["demand"], 1), lost_units=k["lost"], spend=k["spend"],
+        rev = k.get("revenue", 0.0)
+        spoil_units = k.get("spoilage_units", 0)
+        spoil_cost = k.get("spoilage_cost", 0.0)
+        spend = k.get("spend", 0.0)
+        profit = rev - spend - spoil_cost
+        return dict(fill_rate=1 - k["lost"] / max(k["demand"], 1), lost_units=k["lost"], spend=spend,
+                    revenue=rev, profit=profit, spoilage_units=spoil_units, spoilage_cost=spoil_cost,
                     open_pos=len(sim.pending()), inventory_value=inv_val)

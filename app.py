@@ -47,6 +47,9 @@ with st.sidebar:
     if st.button("💥 Demand spike ×3 (next day)"):
         sim.inject_spike(sp, 3.0)
         st.toast(f"{sp}: spike queued - press +1 day")
+    if st.button("❄️ Cold chain disruption (spoilage)"):
+        sim.force_spoilage(sp)
+        st.toast(f"{sp}: batches expired - press +1 day")
     if st.button("🚧 Delay in-transit orders +2d"):
         st.toast(f"{sim.delay_in_transit(2)} orders delayed")
     if st.button("🔄 Reset simulation"):
@@ -56,12 +59,13 @@ with st.sidebar:
 res = st.session_state.result
 dec, k = res["decisions"], res["kpis"]
 st.header("Autonomous Supply Chain Intelligence & Execution System")
-m = st.columns(5)
+m = st.columns(6)
 m[0].metric("Sim day", sim.day, sim.today.strftime("%d %b %Y"))
 m[1].metric("Fill rate", f"{k['fill_rate']:.1%}")
-m[2].metric("Lost sales (units)", k["lost_units"])
-m[3].metric("Procurement spend", f"₹{k['spend']:,.0f}")
-m[4].metric("Open POs", k["open_pos"])
+m[2].metric("Revenue", f"₹{k['revenue']:,.0f}")
+m[3].metric("Net Profit", f"₹{k['profit']:,.0f}")
+m[4].metric("Procurement spend", f"₹{k['spend']:,.0f}")
+m[5].metric("Spoilage waste", f"₹{k['spoilage_cost']:,.0f}", f"{k['spoilage_units']} units", delta_color="inverse")
 
 tab_dash, tab_cock, tab_scn, tab_ord, tab_log = st.tabs(
     ["📊 Dashboard", "🧠 Agent cockpit", "🧪 Scenario simulator", "🧾 Orders & vendors", "📜 Activity log"])
@@ -70,14 +74,27 @@ tab_dash, tab_cock, tab_scn, tab_ord, tab_log = st.tabs(
 with tab_dash:
     rows = []
     for p, d in dec.items():
-        r, ro = d["risk"], d["reorder"]
-        rows.append({"Product": p, "Stock": d["inv"]["total"], "On order": d["inv"]["on_order"],
-                     "Forecast/day": round(d["fc"]["mean7"]), "Days of cover": round(min(r["cover_days"], 99), 1),
-                     "Stockout in (days)": "∞" if math.isinf(r["days_to_stockout"]) else f"{r['days_to_stockout']:.1f}",
-                     "Risk": f"{ICON[r['level']]} {r['level']}", "Reorder?": "YES" if ro["trigger"] else "no",
-                     "Order qty": d["po"]["qty"] if d["po"] else 0, "Vendor": d["po"]["vendor"] if d["po"] else "-",
-                     "Status": f"PO #{d['placed']['id']} placed" if d.get("placed") else ("Draft - awaiting approval" if d["po"] else "-")})
-    st.subheader("Risk & recommended actions")
+        r, ro, pr, per = d["risk"], d["reorder"], d["pricing"], d["perish"]
+        price_tag = f"₹{pr['current_price']}"
+        if pr["discount_pct"] > 0:
+            price_tag += f" (-{pr['discount_pct']:.0%})"
+        elif pr["surge_pct"] > 0:
+            price_tag += f" (+{pr['surge_pct']:.0%})"
+        
+        per_icon = "🔴" if per["status"] == "HIGH" else "🟠" if per["status"] == "MEDIUM" else "🟢"
+
+        rows.append({
+            "Product": p, "Stock": d["inv"]["total"], "On order": d["inv"]["on_order"],
+            "Price": price_tag,
+            "Shelf Life": f"{per['shelf_life']}d",
+            "Expiry Risk": f"{per_icon} {per['status']}",
+            "Forecast/day": round(d["fc"]["mean7"]), "Days cover": round(min(r["cover_days"], 99), 1),
+            "Stockout in": "∞" if math.isinf(r["days_to_stockout"]) else f"{r['days_to_stockout']:.1f}d",
+            "Stock Risk": f"{ICON[r['level']]} {r['level']}", "Reorder?": "YES" if ro["trigger"] else "no",
+            "Order qty": d["po"]["qty"] if d["po"] else 0, "Vendor": d["po"]["vendor"] if d["po"] else "-",
+            "Status": f"PO #{d['placed']['id']} placed" if d.get("placed") else ("Draft - awaiting approval" if d["po"] else "-")
+        })
+    st.subheader("Risk, Perishability & Recommended Actions")
     st.dataframe(pd.DataFrame(rows), hide_index=True)
     a, b = st.columns([3, 2])
     with a:
@@ -98,14 +115,38 @@ with tab_dash:
 with tab_cock:
     p = st.selectbox("Inspect product", list(PRODUCTS), key="cock")
     d = dec[p]
-    c = st.columns(4)
-    c[0].metric("Risk", f"{ICON[d['risk']['level']]} {d['risk']['level']}")
+    c = st.columns(6)
+    c[0].metric("Stock Risk", f"{ICON[d['risk']['level']]} {d['risk']['level']}")
     c[1].metric("Stockout in", "∞" if math.isinf(d["risk"]["days_to_stockout"]) else f"{d['risk']['days_to_stockout']:.1f} d")
-    c[2].metric("Reorder point", f"{d['reorder']['rop']:.0f}")
-    c[3].metric("Dynamic safety stock", f"{d['reorder']['safety_stock']:.0f}", f"vs fixed {d['reorder']['fixed_safety']:.0f}", delta_color="off")
-    st.markdown("##### Agent reasoning trace")
+    c[2].metric("Dynamic Price", f"₹{d['pricing']['current_price']}", f"Base ₹{d['pricing']['base_price']}", delta_color="off")
+    c[3].metric("Shelf Life", f"{d['perish']['shelf_life']} d")
+    c[4].metric("Expiring ≤3d", f"{d['perish']['expiring_soon']} u")
+    c[5].metric("Spoilage Risk", f"₹{d['perish']['exp_loss_est']:,.0f}", f"{d['perish']['at_risk_qty']} at-risk", delta_color="inverse")
+    
+    st.markdown("##### Agent reasoning trace (Multi-Agent Consensus)")
     for ag, msg in d["trace"]:
         st.markdown(f"**{ag}** - {msg}")
+
+    # Perishability and Dynamic Pricing Detailed Cards
+    col_perish, col_price = st.columns(2)
+    with col_perish:
+        st.markdown("##### 🥦 Perishability & FEFO Batch Rotation")
+        st.info(d["perish"]["note"])
+        if d["perish"]["batches"]:
+            b_rows = []
+            for b in d["perish"]["batches"]:
+                b_status = "🔴 Expiring Soon (≤3d)" if b["days_left"] <= 3 else "🟠 Mid-life" if b["days_left"] <= 7 else "🟢 Fresh"
+                b_rows.append({"Location": b["location"], "Qty": b["qty"], "Days Left": f"{b['days_left']}d", "Status": b_status})
+            st.dataframe(pd.DataFrame(b_rows), hide_index=True)
+        else:
+            st.caption("No batch tracking required for non-perishable goods.")
+
+    with col_price:
+        st.markdown("##### 🏷️ Dynamic Pricing & Revenue Strategy")
+        st.info(f"**Strategy**: {d['pricing']['reason']}")
+        dp_metric1, dp_metric2 = st.columns(2)
+        dp_metric1.metric("Discount / Surge", f"{'-' + str(int(d['pricing']['discount_pct']*100)) + '%' if d['pricing']['discount_pct'] > 0 else '+' + str(int(d['pricing']['surge_pct']*100)) + '%' if d['pricing']['surge_pct'] > 0 else '0%'}")
+        dp_metric2.metric("Demand Multiplier", f"×{d['pricing']['demand_mult']}")
     h = sim.hist_df(p)["demand"].tail(30)
     fdates = [sim.today + timedelta(days=i + 1) for i in range(14)]
     chart = pd.DataFrame({"history": h, "forecast": pd.Series(d["fc"]["daily"][:14], index=fdates)})
